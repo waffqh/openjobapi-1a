@@ -1,4 +1,7 @@
 import express from "express";
+import dotenv from "dotenv";
+dotenv.config();
+
 import usersService from "../services/usersService.js";
 import validate from "../middleware/validate.js";
 import authService from "../services/authService.js";
@@ -25,7 +28,10 @@ import jobService from "../services/jobService.js";
 import { jobSchema, updateJobSchema } from "../validators/jobValidator.js";
 
 import applicationService from "../services/applicationService.js";
-import { applicationSchema } from "../validators/applicationValidator.js";
+import {
+  applicationSchema,
+  updateApplicationSchema,
+} from "../validators/applicationValidator.js";
 
 import bookmarkService from "../services/bookmarkService.js";
 import { bookmarkSchema } from "../validators/bookmarkValidator.js";
@@ -95,24 +101,53 @@ router.post("/authentications", validate(authSchema), async (req, res) => {
 
 router.put("/authentications", async (req, res) => {
   try {
+    const JWT_REFRESH_SECRET = process.env.REFRESH_TOKEN_SECRET;
     const { refreshToken } = req.body;
+    if (!refreshToken) {
+      return res.status(400).json({
+        status: "failed",
+        message: error.message,
+      });
+    }
+    const existing = await pool.query(
+      "SELECT token FROM authentications WHERE token = $1",
+      [refreshToken],
+    );
 
-    const decoded = jwt.verify(refreshToken, "refreshsecret");
+    if (existing.rows.length === 0) {
+      throw new Error("Refresh token invalid");
+    }
 
-    const accessToken = jwt.sign({ id: decoded.id }, "accesssecret", {
-      expiresIn: "3h",
-    });
+    let decoded;
+    try {
+      decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET);
+    } catch (err) {
+      await pool.query("DELETE FROM authentications WHERE token = $1", [
+        refreshToken,
+      ]);
+
+      return res.status(401).json({
+        status: "failed",
+        message: "Refresh token tidak valid/expired",
+      });
+    }
+
+    const newAccessToken = jwt.sign(
+      { id: decoded.id, email: decoded.email },
+      JWT_REFRESH_SECRET,
+      { expiresIn: "1h" },
+    );
 
     res.status(200).json({
       status: "success",
       data: {
-        accessToken,
+        accessToken: newAccessToken,
       },
     });
   } catch (error) {
-    res.status(401).json({
+    res.status(400).json({
       status: "failed",
-      message: "Refresh token tidak valid",
+      message: error.message,
     });
   }
 });
@@ -120,7 +155,20 @@ router.put("/authentications", async (req, res) => {
 router.delete("/authentications", async (req, res) => {
   try {
     const { refreshToken } = req.body;
+    if (!refreshToken) {
+      return res.status(400).json({
+        status: "failed",
+        message: error.message,
+      });
+    }
+    const existing = await pool.query(
+      "SELECT token FROM authentications WHERE token = $1",
+      [refreshToken],
+    );
 
+    if (existing.rows.length === 0) {
+      throw new Error("Refresh token invalid");
+    }
     await pool.query({
       text: `
           DELETE FROM authentications
@@ -177,6 +225,38 @@ router.post("/categories", auth, validate(categorySchema), async (req, res) => {
     });
   } catch (error) {
     res.status(400).json({
+      status: "failed",
+      message: error.message,
+    });
+  }
+});
+
+router.post("/jobs/:id/bookmark", auth, async (req, res) => {
+  try {
+    const result = await bookmarkService.addBookmark(req);
+
+    res.status(201).json({
+      status: "success",
+      data: result,
+    });
+  } catch (error) {
+    res.status(400).json({
+      status: "failed",
+      message: error.message,
+    });
+  }
+});
+
+router.get("/jobs/:id/bookmark/:bookmarkId", auth, async (req, res) => {
+  try {
+    const result = await bookmarkService.getBookmarkById(req.params.bookmarkId);
+
+    res.status(200).json({
+      status: "success",
+      data: result,
+    });
+  } catch (error) {
+    res.status(404).json({
       status: "failed",
       message: error.message,
     });
@@ -369,7 +449,6 @@ router.delete("/jobs/:id", auth, async (req, res) => {
       message: "Job deleted",
     });
   } catch (error) {
-    // Tambahkan log penanda khusus di sini
     console.error("=== ERROR INI FIX BERASAL DARI ROUTE DELETE ===");
     console.error(error.message);
 
@@ -392,9 +471,7 @@ router.post(
 
       res.status(201).json({
         status: "success",
-        data: {
-          addedApplication: result,
-        },
+        data: result,
       });
     } catch (error) {
       res.status(400).json({
@@ -416,6 +493,104 @@ router.get("/applications", auth, async (req, res) => {
       },
     });
   } catch (error) {
+    res.status(500).json({
+      status: "failed",
+      message: error.message,
+    });
+  }
+});
+
+router.get("/applications/:id", auth, async (req, res) => {
+  try {
+    const result = await applicationService.getApplicationsById(req.params.id);
+
+    res.status(200).json({
+      status: "success",
+      data: result,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: "failed",
+      message: error.message,
+    });
+  }
+});
+
+router.get("/applications/user/:id", auth, async (req, res) => {
+  try {
+    const result = await applicationService.getApplicationsByUserId(
+      req.params.id,
+    );
+
+    res.status(200).json({
+      status: "success",
+      data: {
+        applications: result,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: "failed",
+      message: error.message,
+    });
+  }
+});
+
+router.get("/applications/job/:id", auth, async (req, res) => {
+  try {
+    const result = await applicationService.getApplicationsByJobId(
+      req.params.id,
+    );
+
+    res.status(200).json({
+      status: "success",
+      data: {
+        applications: result,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: "failed",
+      message: error.message,
+    });
+  }
+});
+
+router.put("/applications/:id", auth, async (req, res, next) => {
+  try {
+    const { error, value } = updateApplicationSchema.validate(req.body);
+    if (error) {
+      return res.status(404).json({
+        status: "failed",
+        message: error.message,
+      });
+    }
+    await applicationService.updateApplicationsById(req.params.id, req.body);
+
+    res.status(200).json({
+      status: "success",
+      message: "Applications updated",
+    });
+  } catch (error) {
+    res.status(404).json({
+      status: "failed",
+      message: error.message,
+    });
+  }
+});
+
+router.delete("/applications/:id", auth, async (req, res) => {
+  try {
+    await applicationService.deleteApplicationsById(req.params.id);
+
+    res.status(200).json({
+      status: "success",
+      message: "Applications deleted",
+    });
+  } catch (error) {
+    console.error("=== ERROR INI FIX BERASAL DARI ROUTE DELETE ===");
+    console.error(error.message);
+
     res.status(500).json({
       status: "failed",
       message: error.message,
@@ -454,6 +629,25 @@ router.get("/bookmarks", auth, async (req, res) => {
       },
     });
   } catch (error) {
+    res.status(500).json({
+      status: "failed",
+      message: error.message,
+    });
+  }
+});
+
+router.delete("/jobs/:id/bookmark", auth, async (req, res) => {
+  try {
+    await bookmarkService.deleteBookmark(req.params.id);
+
+    res.status(200).json({
+      status: "success",
+      message: "Bookmarks deleted",
+    });
+  } catch (error) {
+    console.error("=== ERROR INI FIX BERASAL DARI ROUTE DELETE ===");
+    console.error(error.message);
+
     res.status(500).json({
       status: "failed",
       message: error.message,
